@@ -1,0 +1,12 @@
+langchain==0.1.20
+langchain-community==0.0.38
+
+faiss-cpu==1.7.4
+
+pypdf==3.17.4
+
+sentence-transformers==2.7.0
+transformers==4.40.2
+torch
+
+python-dotenv==1.0.1
