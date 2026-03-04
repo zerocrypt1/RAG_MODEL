@@ -1,17 +1,13 @@
 """
 app/services/rag_service.py
-Full Retrieval-Augmented Generation pipeline using:
-  • LangChain (document loading, splitting, chain)
-  • OpenAI Embeddings (text-embedding-ada-002)
-  • FAISS (local vector store, persisted to disk)
-  • ChatOpenAI GPT-3.5 / GPT-4
 
-Public API
-----------
-process_pdf(pdf_path, pdf_id)   →  dict   build & save vector store
-query(vector_store_id, question, history)  →  dict   RAG answer + sources
-delete_store(vector_store_id)   →  None   remove from disk
-store_exists(vector_store_id)   →  bool
+Local RAG pipeline using:
+
+• HuggingFace embeddings
+• FAISS vector store
+• Ollama local LLM
+
+No OpenAI API required.
 """
 
 import os
@@ -23,32 +19,41 @@ from typing import Optional
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.llms import Ollama
+
 from langchain_community.vectorstores import FAISS
+
 from langchain.chains import ConversationalRetrievalChain
-from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
-from langchain.schema import HumanMessage, AIMessage
 
 logger = logging.getLogger(__name__)
 
-# ── Config ────────────────────────────────────────────────────────────────────
-_VECTOR_STORE_DIR = Path(os.environ.get("VECTOR_STORE_DIR", "/tmp/vector_stores"))
-_OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-_OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-3.5-turbo")
-_OPENAI_EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-ada-002")
 
-# Chunking strategy
-_CHUNK_SIZE = 1_000
+# ─────────────────────────────────────────────
+# Configuration
+# ─────────────────────────────────────────────
+
+_VECTOR_STORE_DIR = Path(
+    os.environ.get("VECTOR_STORE_DIR", "./vector_stores")
+)
+
+_CHUNK_SIZE = 1000
 _CHUNK_OVERLAP = 200
-
-# Retrieval
 _TOP_K = 4
 
+_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
-# ── Internal helpers ──────────────────────────────────────────────────────────
+_OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "mistral")
+_OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
-def _ensure_dir() -> None:
+
+# ─────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────
+
+def _ensure_dir():
     _VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -56,195 +61,170 @@ def _store_path(vector_store_id: str) -> Path:
     return _VECTOR_STORE_DIR / vector_store_id
 
 
-def _embeddings() -> OpenAIEmbeddings:
-    return OpenAIEmbeddings(
-        openai_api_key=_OPENAI_API_KEY,
-        model=_OPENAI_EMBEDDING_MODEL,
+def _embeddings():
+    """
+    Load HuggingFace embedding model
+    """
+    return HuggingFaceEmbeddings(
+        model_name=_EMBEDDING_MODEL
     )
 
 
-def _llm() -> ChatOpenAI:
-    return ChatOpenAI(
-        openai_api_key=_OPENAI_API_KEY,
-        model_name=_OPENAI_MODEL,
-        temperature=0.2,
-        max_tokens=1_024,
-        request_timeout=60,
+def _llm():
+    """
+    Local Ollama LLM
+    """
+    return Ollama(
+        model=_OLLAMA_MODEL,
+        base_url=_OLLAMA_URL,
+        temperature=0.2
     )
 
 
-# ── System prompt ─────────────────────────────────────────────────────────────
-_CONDENSE_QUESTION_PROMPT = PromptTemplate.from_template(
-    """Given the following conversation history and a follow-up question,
-rephrase the follow-up question to be a standalone question.
-If it is already a standalone question, return it as-is.
-
-Chat History:
-{chat_history}
-
-Follow-Up Question: {question}
-
-Standalone Question:"""
-)
+# ─────────────────────────────────────────────
+# Prompt Template
+# ─────────────────────────────────────────────
 
 _QA_PROMPT = PromptTemplate(
     input_variables=["context", "question"],
-    template="""You are an expert assistant helping users understand PDF documents.
-Use ONLY the context below to answer the question accurately and concisely.
-If the answer is not found in the context, say: "I couldn't find that information in this document."
-Always reference specific page numbers when possible (e.g. "According to page 3…").
+    template="""
+You are an assistant helping users understand a document.
 
-Context from document:
+Use ONLY the provided context to answer the question.
+
+If the answer cannot be found in the document say:
+"I couldn't find that information in the document."
+
+Always mention page numbers if possible.
+
+Context:
 {context}
 
-Question: {question}
+Question:
+{question}
 
-Detailed Answer:""",
+Answer:
+"""
 )
 
 
-# ── Public API ─────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# Process PDF
+# ─────────────────────────────────────────────
 
 def process_pdf(pdf_path: str, pdf_id: str) -> dict:
-    """
-    Load a PDF, split it into chunks, create OpenAI embeddings, and save a
-    FAISS index to disk.
 
-    Parameters
-    ----------
-    pdf_path : str
-        Absolute local path to the PDF file.
-    pdf_id : str
-        Unique identifier – used as the folder name for the vector store.
-
-    Returns
-    -------
-    dict
-        {
-            "page_count": int,
-            "chunk_count": int,
-            "vector_store_id": str,
-        }
-
-    Raises
-    ------
-    FileNotFoundError
-        If the PDF does not exist at the given path.
-    Exception
-        Propagated from LangChain / OpenAI on any processing error.
-    """
     if not os.path.isfile(pdf_path):
-        raise FileNotFoundError(f"PDF not found at {pdf_path!r}")
+        raise FileNotFoundError(f"PDF not found at {pdf_path}")
 
     _ensure_dir()
-    logger.info("[RAG] Processing %s (id=%s)", pdf_path, pdf_id)
 
-    # 1. Load ──────────────────────────────────────────────────────────────────
+    logger.info("[RAG] Processing PDF %s", pdf_path)
+
     loader = PyPDFLoader(pdf_path)
-    pages = loader.load()
-    page_count = len(pages)
-    logger.info("[RAG] Loaded %d pages", page_count)
 
-    # 2. Split ─────────────────────────────────────────────────────────────────
+    pages = loader.load()
+
+    page_count = len(pages)
+
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=_CHUNK_SIZE,
         chunk_overlap=_CHUNK_OVERLAP,
-        length_function=len,
-        separators=["\n\n", "\n", ". ", " ", ""],
+        length_function=len
     )
+
     chunks = splitter.split_documents(pages)
 
-    # Enrich metadata so we can show page citations in the UI
     for i, chunk in enumerate(chunks):
-        chunk.metadata.setdefault("page", 0)         # PyPDFLoader sets this
+
         chunk.metadata["chunk_index"] = i
         chunk.metadata["pdf_id"] = pdf_id
 
     chunk_count = len(chunks)
-    logger.info("[RAG] Created %d chunks", chunk_count)
 
-    # 3. Embed + index ─────────────────────────────────────────────────────────
-    logger.info("[RAG] Building FAISS index…")
+    logger.info("[RAG] Creating embeddings")
+
     embeddings = _embeddings()
-    vector_store = FAISS.from_documents(chunks, embeddings)
 
-    # 4. Persist ───────────────────────────────────────────────────────────────
+    vector_store = FAISS.from_documents(
+        chunks,
+        embeddings
+    )
+
     store_path = _store_path(pdf_id)
+
     vector_store.save_local(str(store_path))
+
     logger.info("[RAG] Vector store saved to %s", store_path)
 
     return {
         "page_count": page_count,
         "chunk_count": chunk_count,
-        "vector_store_id": pdf_id,
+        "vector_store_id": pdf_id
     }
 
+
+# ─────────────────────────────────────────────
+# Query RAG
+# ─────────────────────────────────────────────
 
 def query(
     vector_store_id: str,
     question: str,
-    chat_history: Optional[list] = None,
+    chat_history: Optional[list] = None
 ) -> dict:
-    """
-    Answer a question against a stored FAISS index.
 
-    Parameters
-    ----------
-    vector_store_id : str
-        ID of the previously built vector store.
-    question : str
-        The user's question.
-    chat_history : list, optional
-        Previous messages in the format:
-            [{"role": "user"|"assistant", "content": "..."}]
-
-    Returns
-    -------
-    dict
-        {
-            "answer": str,
-            "sources": [{"page": int, "content": str}],
-            "latency_ms": int,
-        }
-
-    Raises
-    ------
-    FileNotFoundError
-        If the vector store does not exist on disk.
-    """
     store_path = _store_path(vector_store_id)
+
     if not store_path.exists():
         raise FileNotFoundError(
-            f"Vector store '{vector_store_id}' not found. "
-            "The PDF may still be processing or an error occurred."
+            f"Vector store '{vector_store_id}' not found"
         )
 
-    t0 = time.monotonic()
+    start = time.monotonic()
+
     embeddings = _embeddings()
 
-    # allow_dangerous_deserialization required for FAISS >= 0.1.0
+    # ❌ FIXED HERE (removed allow_dangerous_deserialization)
+
     vector_store = FAISS.load_local(
         str(store_path),
-        embeddings,
-        allow_dangerous_deserialization=True,
+        embeddings
     )
 
     retriever = vector_store.as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": _TOP_K},
+        search_kwargs={"k": _TOP_K}
     )
 
-    # Build LangChain message history from our dict format
-    lc_history: list[tuple[str, str]] = []
+    history = []
+
     if chat_history:
-        # Pair up consecutive user / assistant turns
+
+        msgs = [
+            m for m in chat_history
+            if m["role"] in ("user", "assistant")
+        ]
+
         i = 0
-        msgs = [m for m in chat_history if m["role"] in ("user", "assistant")]
+
         while i < len(msgs) - 1:
-            if msgs[i]["role"] == "user" and msgs[i + 1]["role"] == "assistant":
-                lc_history.append((msgs[i]["content"], msgs[i + 1]["content"]))
+
+            if (
+                msgs[i]["role"] == "user"
+                and msgs[i + 1]["role"] == "assistant"
+            ):
+
+                history.append(
+                    (
+                        msgs[i]["content"],
+                        msgs[i + 1]["content"]
+                    )
+                )
+
                 i += 2
+
             else:
+
                 i += 1
 
     llm = _llm()
@@ -253,53 +233,72 @@ def query(
         llm=llm,
         retriever=retriever,
         return_source_documents=True,
-        combine_docs_chain_kwargs={"prompt": _QA_PROMPT},
-        condense_question_prompt=_CONDENSE_QUESTION_PROMPT,
-        verbose=False,
+        combine_docs_chain_kwargs={"prompt": _QA_PROMPT}
     )
 
-    result = chain.invoke({"question": question, "chat_history": lc_history})
+    result = chain.invoke(
+        {
+            "question": question,
+            "chat_history": history
+        }
+    )
 
-    latency_ms = int((time.monotonic() - t0) * 1_000)
+    latency_ms = int((time.monotonic() - start) * 1000)
 
-    # De-duplicate sources by page number, keep snippet for display
-    seen_pages: set[int] = set()
-    sources: list[dict] = []
+    seen_pages = set()
+    sources = []
+
     for doc in result.get("source_documents", []):
-        page = int(doc.metadata.get("page", 0)) + 1  # 0-indexed → 1-indexed
+
+        page = int(doc.metadata.get("page", 0)) + 1
+
         if page not in seen_pages:
+
             seen_pages.add(page)
+
             snippet = doc.page_content[:250].strip()
+
             if len(doc.page_content) > 250:
-                snippet += "…"
-            sources.append({"page": page, "content": snippet})
+                snippet += "..."
+
+            sources.append(
+                {
+                    "page": page,
+                    "content": snippet
+                }
+            )
 
     sources.sort(key=lambda s: s["page"])
 
     return {
         "answer": result["answer"].strip(),
         "sources": sources,
-        "latency_ms": latency_ms,
+        "latency_ms": latency_ms
     }
 
 
-def delete_store(vector_store_id: str) -> None:
-    """
-    Remove the FAISS index directory from disk.
+# ─────────────────────────────────────────────
+# Delete Vector Store
+# ─────────────────────────────────────────────
 
-    Parameters
-    ----------
-    vector_store_id : str
-        ID of the vector store to delete.
-    """
+def delete_store(vector_store_id: str):
+
     store_path = _store_path(vector_store_id)
-    if store_path.exists():
-        shutil.rmtree(store_path)
-        logger.info("[RAG] Deleted vector store %s", vector_store_id)
-    else:
-        logger.warning("[RAG] delete_store: '%s' not found on disk", vector_store_id)
 
+    if store_path.exists():
+
+        shutil.rmtree(store_path)
+
+        logger.info(
+            "[RAG] Deleted vector store %s",
+            vector_store_id
+        )
+
+
+# ─────────────────────────────────────────────
+# Store Exists
+# ─────────────────────────────────────────────
 
 def store_exists(vector_store_id: str) -> bool:
-    """Return True if the FAISS index folder exists on disk."""
+
     return _store_path(vector_store_id).exists()
