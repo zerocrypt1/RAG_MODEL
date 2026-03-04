@@ -1,0 +1,8 @@
+{
+  "built_at": "2026-03-04T18:27:07.203326",
+  "total": 10,
+  "from_docs": 111,
+  "from_chat": 3,
+  "from_custom": 1,
+  "dataset_file": "training_data/dataset.jsonl"
+}

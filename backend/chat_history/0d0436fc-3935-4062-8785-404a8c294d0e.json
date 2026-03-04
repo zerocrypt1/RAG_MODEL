@@ -1,0 +1,30 @@
+{
+  "session_id": "0d0436fc-3935-4062-8785-404a8c294d0e",
+  "title": "Chat about instagram_message.png",
+  "messages": [
+    {
+      "role": "user",
+      "content": "what about this ing"
+    },
+    {
+      "role": "assistant",
+      "content": "It seems like Raaghul is referring to the laptop that he bought, which he will bring with him when he arrives on March 20th. The \"ing\" in this context is a present participle, which is a verb form that shows ongoing action. In this case, \"bringing\" is the ongoing action of bringing the laptop. Hope that helps! :)"
+    },
+    {
+      "role": "user",
+      "content": "is image me kya hai"
+    },
+    {
+      "role": "assistant",
+      "content": "\"Image me\" in this context means \"send me\" or \"show me\" an image. The sender is referring to the laptop that he has already bought. So, \"image me\" here means \"send me the picture of the laptop\"."
+    },
+    {
+      "role": "user",
+      "content": "एक चीज बताना एपी फाइल क्या होता है"
+    },
+    {
+      "role": "assistant",
+      "content": ".apk फाइल एक Android अप्लिकेशन का एक पैकेज है। यह फाइल अप्लिकेशन को अन्ड्रॉइड फोन पर इनस्टॉल करने के लिए उपयोगी है। इसका अलग-अलग नाम के साथ भी जाना जाता है, लिखते हैं कि APK, Android Application Package या Android Package Kit कहलाता है।"
+    }
+  ]
+}

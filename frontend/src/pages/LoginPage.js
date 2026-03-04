@@ -30,17 +30,14 @@ export default function LoginPage() {
   const googleLogin = useGoogleLogin({
     onSuccess: async (tokenResponse) => {
       try {
-        // Exchange access token for ID token via userinfo
-        const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-          headers: { Authorization: `Bearer ${tokenResponse.access_token}` }
-        });
-        const userInfo = await userInfoRes.json();
-        // We need to pass the access token and user info to backend
         const res = await authAPI.googleAuth(tokenResponse.access_token);
+  
         login(res.data.token, res.data.user);
         toast.success('Logged in with Google!');
         navigate('/dashboard');
+  
       } catch (err) {
+        console.error(err);
         toast.error('Google login failed');
       }
     },
