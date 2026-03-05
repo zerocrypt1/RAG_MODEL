@@ -1,0 +1,22 @@
+{
+  "session_id": "9d5ef638-9df0-4c4c-a47f-e130a8d3305b",
+  "title": "Chat about RESUM97.pdf",
+  "messages": [
+    {
+      "role": "user",
+      "content": "explain about this doxumet"
+    },
+    {
+      "role": "assistant",
+      "content": "The document provides information about a professional named Shivansh Mishra, who is a Backend Engineer and Lead Security Architect with over 4 years of experience. The document details his skills, professional experience, key projects, and research areas.\n\nShivansh has expertise in microservices architecture, scalable backend systems, REST API development, API integration, database engineering, high availability, performance optimization, JWT authentication, Redis caching, OAuth 2.0, RBAC, CI/CD automation, Docker, Kubernetes, Git, Agile/Scrum, Monitoring and Logging, Zero Trust Architecture, Blockchain (Solidity), Artificial Intelligence, and backend innovation.\n\nIn terms of professional experience, Shivansh is currently the Founder & Lead Security Architect at GLOCYBS Pvt. Ltd., where he architected BIQUA, a microservices-based 5-pillar security ecosystem. He has also worked as a Lead Backend Engineer at Vidyazon.\n\nKey projects mentioned include BIQUA, a 5-pillar security ecosystem that integrates Blockchain, Quantum security models, AI threat detection, and microservices architecture into a unified cybersecurity framework. This project is designed to reduce enterprise vulnerability exposure by 42%. Another project, Project X-Cell, is a research project on self-defending microservices infrastructure integrating AI-driven intrusion detection and adaptive mitigation.\n\nShivansh's research areas include Post-Quantum Cryptography, Quantum Search Optimization, and Semiconductor and Superconductor integration strategies for Quantum Processing Units (QPUs).\n\nThe document also provides contact information for Shivansh, including his phone number, email address, LinkedIn profile, GitHub profile, and personal website."
+    },
+    {
+      "role": "user",
+      "content": "according to this shivansh mishra ko ki job reffer karo na"
+    },
+    {
+      "role": "assistant",
+      "content": "Shivansh Mishra is referred to as a Backend Engineer and Lead Security Architect."
+    }
+  ]
+}

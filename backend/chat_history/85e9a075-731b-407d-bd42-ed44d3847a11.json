@@ -1,0 +1,22 @@
+{
+  "session_id": "85e9a075-731b-407d-bd42-ed44d3847a11",
+  "title": "Chat about Ticket_2449301232.pdf",
+  "messages": [
+    {
+      "role": "user",
+      "content": "what is passenger details"
+    },
+    {
+      "role": "assistant",
+      "content": "The passenger details are as follows:\n\n1. Name: SHIVAM PANDEY\n2. Age: 25\n3. Gender: M\n4. Booking Status: CNF/B9/14/UPPER (Confirmed in Upper Berth)\n5. Current Status: CNF/B9/14/UPPER (Confirmed in Upper Berth)\n\nThis information is not present in the document for other passengers."
+    },
+    {
+      "role": "user",
+      "content": "what is api"
+    },
+    {
+      "role": "assistant",
+      "content": "The document does not provide any information about API (Application Programming Interface)."
+    }
+  ]
+}

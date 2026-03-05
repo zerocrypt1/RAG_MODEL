@@ -1,14 +1,12 @@
 """
 app/services/rag_service.py
 
-Fast Local RAG pipeline — v2
+Stable Local RAG pipeline
 
-• HuggingFace embeddings (loaded once)
-• FAISS vector store cache
-• Ollama LLM with human-like, multilingual responses
-• PDF, Image, Word, Excel support
-• Web search fallback
-• Hindi / English / Hinglish support
+Priority
+1. Document search
+2. LLM answer from document
+3. Web fallback (ONLY if document not found)
 """
 
 import os
@@ -18,255 +16,165 @@ import time
 from pathlib import Path
 from typing import Optional
 
-# Document Loaders
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.document_loaders import UnstructuredWordDocumentLoader
-from langchain_community.document_loaders import UnstructuredExcelLoader
+from langchain_community.document_loaders import (
+    PyPDFLoader,
+    UnstructuredWordDocumentLoader,
+    UnstructuredExcelLoader
+)
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.llms import Ollama
 from langchain_community.vectorstores import FAISS
+from langchain_community.llms import Ollama
 
+from langchain_core.documents import Document
 from langchain_core.prompts import PromptTemplate
-from langchain.chains.conversational_retrieval.base import ConversationalRetrievalChain
 
 from app.services.web_search_service import web_answer
 
-# OCR for images
-try:
-    from PIL import Image
-    import pytesseract
-    _OCR_AVAILABLE = True
-except ImportError:
-    _OCR_AVAILABLE = False
-
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────
+# ------------------------------------------------
 # CONFIG
-# ─────────────────────────────────────────────
+# ------------------------------------------------
 
-_VECTOR_STORE_DIR = Path(
-    os.environ.get("VECTOR_STORE_DIR", "./vector_stores")
-)
+VECTOR_DIR = Path(os.environ.get("VECTOR_STORE_DIR", "./vector_stores"))
 
-_CHUNK_SIZE    = 800   # smaller = faster retrieval
-_CHUNK_OVERLAP = 100
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 120
 
-_TOP_K            = 3
-_SCORE_THRESHOLD  = 5.0
+TOP_K = 4
 
-_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+# FAISS similarity distance
+SCORE_THRESHOLD = 2.0
 
-_OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "mistral")
-_OLLAMA_URL   = os.environ.get("OLLAMA_URL",   "http://localhost:11434")
+EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 
-# ─────────────────────────────────────────────
-# GLOBAL CACHE
-# ─────────────────────────────────────────────
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "mistral")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
-_embedding_model    = None
-_llm_model          = None
-_vector_store_cache = {}
-_answer_cache: dict = {}          # simple in-memory answer cache
-_ANSWER_CACHE_TTL   = 300         # seconds — reuse identical questions for 5 min
+_embeddings = None
+_llm = None
+_vector_cache = {}
 
-# ─────────────────────────────────────────────
+# ------------------------------------------------
 # LANGUAGE DETECTION
-# ─────────────────────────────────────────────
+# ------------------------------------------------
 
-def detect_language(text: str) -> str:
-    """
-    Heuristic language detector.
-    Returns: 'hindi', 'hinglish', or 'english'
-    """
+def detect_language(text: str):
+
     import re
 
-    # ── 1. Pure Hindi (Devanagari characters) ─────────────────────────────
     hindi_chars = sum(1 for c in text if '\u0900' <= c <= '\u097F')
+
     if hindi_chars > 2:
         return "hindi"
 
-    # ── 2. Strip punctuation and lowercase ────────────────────────────────
-    clean  = re.sub(r"[^\w\s]", "", text.lower())
-    words  = clean.split()
+    clean = re.sub(r"[^\w\s]", "", text.lower())
+    words = clean.split()
 
-    # ── 3. Comprehensive Hinglish keyword set ─────────────────────────────
-    #       Covers greetings, question words, common verbs, connectors,
-    #       colloquials, and sentence-starters people actually type.
-    hinglish_keywords = {
-        # Greetings / fillers
-        "haan", "nahi", "nah", "nahin", "haa", "oye", "arre", "arrey",
-        "yaar", "bhai", "dost", "bro",
-        # Question words
-        "kya", "kyu", "kyun", "kaise", "kaisa", "kaisi", "kab", "kahan",
-        "kaun", "kitna", "kitne", "kitni",
-        # Pronouns
-        "mai", "main", "mujhe", "mera", "meri", "mere", "mujhko",
-        "tera", "teri", "tere", "tumhara", "tumhari", "aapka",
-        "aap", "tum", "tu", "wo", "woh", "yeh", "ye", "isko", "usko",
-        # Verbs / imperatives
-        "hai", "hain", "tha", "thi", "the", "hoga", "hogi",
-        "karo", "karna", "kar", "bolo", "bol", "batao", "bata",
-        "dekho", "dekh", "suno", "sun", "samjho", "samajh",
-        "aao", "jao", "ruko", "chalo", "lo", "do",
-        "chahiye", "chahie", "chahta", "chahti",
-        "likhna", "likhdo", "padho",
-        # Common words
-        "aur", "ya", "lekin", "magar", "par", "toh", "to", "bhi",
-        "sirf", "bas", "hi", "na", "ne", "se", "mein", "pe", "ko",
-        "ka", "ki", "ke", "wala", "wali",
-        # Adjectives / adverbs
-        "accha", "achha", "acha", "theek", "thik", "sahi", "galat",
-        "bahut", "bohat", "thoda", "zyada", "jyada", "kam",
-        "abhi", "baad", "pehle", "phir", "fir", "jaldi", "dhire",
-        "aisa", "waisa", "itna",
-        # Expressions
-        "matlab", "yani", "matlab", "lagta", "lagti", "laga",
-        "pata", "samajh", "sorry", "please", "thanks", "shukriya",
-        "pyaar", "pyar", "dil", "zindagi",
+    hinglish_words = {
+        "kya","kaise","kyu","bhai","yaar","hai",
+        "nahi","haan","bolo","bata"
     }
 
-    count = sum(1 for w in words if w in hinglish_keywords)
-
-    # Even ONE clear Hinglish word in a short message is enough
-    if count >= 1:
+    if any(w in hinglish_words for w in words):
         return "hinglish"
 
     return "english"
 
 
-def _language_instruction(lang: str) -> str:
-    """
-    Return a STRICT language rule with few-shot examples.
-    Mistral needs concrete examples — vague instructions get ignored.
-    """
-    if lang == "hindi":
-        return """
+# ------------------------------------------------
+# EMBEDDINGS
+# ------------------------------------------------
 
-══ STRICT RULE: REPLY IN HINDI ONLY ══
-User ne Hindi mein likha hai.
-POORA reply SIRF Hindi (Devanagari) mein dena — ek bhi English sentence nahi.
-Tone: warm, simple, dost jaisi.
+def emb():
 
-Example:
-User: यह document किस बारे में है?
-AI:   यह document company की financial report है! Page 3 पर quarterly revenue है
-      और page 7 पर expenses का breakdown। कुछ और जानना हो तो बताओ! 😊"""
+    global _embeddings
 
-    if lang == "hinglish":
-        return """
+    if _embeddings is None:
 
-══ STRICT RULE: REPLY IN HINGLISH ONLY ══
-User Hinglish mein baat kar raha hai (Hindi + English mix).
-POORA reply HINGLISH mein likhna — PURE ENGLISH mein reply karna GALAT hai.
+        logger.info("[RAG] loading embeddings")
 
-Hinglish kya hai:
-- English words use karo (love, machine, document, etc.)
-- BUT Hindi sentence structure aur fillers use karo
-- "yaar", "bhai", "toh", "hai", "kya", "matlab", "dekh", "arre" — zaroor use karo
-- Casual, friendly, jaise dost baat karta hai
-
-══ FEW-SHOT EXAMPLES ══
-
-User: "suno i love you"
-AI: "Arre yaar, 'I love you' ek bahut powerful feeling hai! Kisi ke liye deep
-    affection aur care feel karne ko bolte hain isse. Jab dil se bolte ho toh
-    samne wale ko bahut special feel hota hai. Kisi ko bolne ka plan chal raha
-    hai kya? 😄 Bata, help karunga!"
-
-User: "kya hai machine learning"
-AI: "Bhai, machine learning basically computers ko experience se seekhne ki
-    ability dena hai — bina manually program kiye! Jaise tu movies dekh ke
-    apna taste develop karta hai, waise computer data dekh ke patterns seekhta
-    hai. Netflix recommendations, face unlock, spam filter — yeh sab ML hai
-    yaar! 🤖 Kuch aur jaanna hai?"
-
-User: "document mein kya likha hai"
-AI: "Dekh bhai, maine document check kiya — page 3 pe main points hain. Basically
-    yeh report Q3 performance ke baare mein hai. Revenue 20% badha hai aur
-    expenses thodi zyada hain. Koi specific cheez jaanni hai? Bata! 📄"
-
-══ AB USER KA QUESTION HINGLISH MEIN ANSWER KAR ══
-(Pure English = WRONG. Hinglish = CORRECT.)"""
-
-    return """
-
-Reply in friendly, conversational English — like a knowledgeable best friend.
-Be warm, occasionally witty, and direct. No corporate/robotic language."""
-
-# ─────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────
-
-def _ensure_dir():
-    _VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _store_path(vector_store_id: str) -> Path:
-    return _VECTOR_STORE_DIR / vector_store_id
-
-
-def _embeddings():
-    global _embedding_model
-    if _embedding_model is None:
-        logger.info("[RAG] Loading embedding model")
-        _embedding_model = HuggingFaceEmbeddings(model_name=_EMBEDDING_MODEL)
-    return _embedding_model
-
-
-def _llm():
-    global _llm_model
-    if _llm_model is None:
-        logger.info("[RAG] Connecting to Ollama")
-        _llm_model = Ollama(
-            model=_OLLAMA_MODEL,
-            base_url=_OLLAMA_URL,
-            temperature=0.3,
-            num_ctx=2048,       # reduced context = faster generation
-            num_thread=8,
-            num_predict=512,    # cap output length for speed
-            timeout=60,
+        _embeddings = HuggingFaceEmbeddings(
+            model_name=EMBED_MODEL
         )
-    return _llm_model
+
+    return _embeddings
 
 
-def _load_vector_store(vector_store_id: str):
-    if vector_store_id in _vector_store_cache:
-        return _vector_store_cache[vector_store_id]
+# ------------------------------------------------
+# LLM
+# ------------------------------------------------
 
-    store_path = _store_path(vector_store_id)
+def llm():
 
-    if not store_path.exists():
-        raise FileNotFoundError(f"Vector store '{vector_store_id}' not found")
+    global _llm
 
-    logger.info("[RAG] Loading vector store %s", vector_store_id)
+    if _llm is None:
 
-    vector_store = FAISS.load_local(
-        str(store_path),
-        _embeddings(),
+        logger.info("[RAG] connecting ollama")
+
+        _llm = Ollama(
+            model=OLLAMA_MODEL,
+            base_url=OLLAMA_URL,
+            temperature=0.2,
+            num_ctx=4096,
+            num_thread=8
+        )
+
+    return _llm
+
+
+# ------------------------------------------------
+# VECTOR STORE
+# ------------------------------------------------
+
+def store_path(store_id):
+    return VECTOR_DIR / store_id
+
+
+def load_store(store_id):
+
+    if store_id in _vector_cache:
+        return _vector_cache[store_id]
+
+    path = store_path(store_id)
+
+    if not path.exists():
+        raise FileNotFoundError(store_id)
+
+    logger.info("[RAG] loading vector store %s", store_id)
+
+    store = FAISS.load_local(
+        str(path),
+        emb(),
         allow_dangerous_deserialization=True
     )
 
-    _vector_store_cache[vector_store_id] = vector_store
-    return vector_store
+    _vector_cache[store_id] = store
 
-# ─────────────────────────────────────────────
-# PROMPT  (dynamic — language injected at runtime)
-# ─────────────────────────────────────────────
+    return store
 
-_QA_TEMPLATE = """You are Shivansh's AI buddy — smart, warm, and a little witty.
-You feel like a knowledgeable best friend who happens to have read every document ever.
+
+# ------------------------------------------------
+# PROMPT
+# ------------------------------------------------
+
+PROMPT = PromptTemplate(
+
+    input_variables=["context", "question"],
+
+    template="""
+
+You are an AI assistant answering from a document.
 
 Rules:
-1. Use ONLY the context below to answer.
-2. If the answer isn't there, say so honestly in a friendly way.
-3. Reference page numbers when possible.
-4. Keep it conversational — no robotic bullet-point dumps unless they genuinely help.
-5. Use light humor or empathy when appropriate.
-{language_instruction}
+
+1. ONLY use the document context.
+2. If answer not found reply exactly:
+"This information is not present in the document."
+3. Never use external knowledge.
 
 Context:
 {context}
@@ -274,329 +182,209 @@ Context:
 Question:
 {question}
 
-Answer:"""
+Answer:
+"""
+)
 
 
-def _build_prompt(lang: str) -> PromptTemplate:
-    template = _QA_TEMPLATE.replace(
-        "{language_instruction}",
-        _language_instruction(lang)
-    )
-    return PromptTemplate(
-        input_variables=["context", "question"],
-        template=template
-    )
+# ------------------------------------------------
+# DOCUMENT LOADER
+# ------------------------------------------------
 
-# ─────────────────────────────────────────────
-# DOCUMENT LOADERS  (multi-format)
-# ─────────────────────────────────────────────
+def load_document(file_path):
 
-def _load_document(file_path: str):
-    """Load PDF / CSV / image / Word / Excel → list[Document]"""
-    path   = Path(file_path)
+    path = Path(file_path)
     suffix = path.suffix.lower()
 
+    logger.info("[RAG] loading file %s", suffix)
+
     if suffix == ".pdf":
-        return PyPDFLoader(str(path)).load()
+
+        docs = PyPDFLoader(str(path)).load()
+
+        logger.info("[RAG] PDF pages: %s", len(docs))
+
+        return docs
 
     if suffix in (".doc", ".docx"):
-        return UnstructuredWordDocumentLoader(str(path)).load()
+
+        return UnstructuredWordDocumentLoader(
+            str(path)
+        ).load()
 
     if suffix in (".xls", ".xlsx"):
-        return UnstructuredExcelLoader(str(path)).load()
+
+        return UnstructuredExcelLoader(
+            str(path)
+        ).load()
 
     if suffix == ".csv":
-        return _load_csv(str(path))
+
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+
+        return [Document(page_content=text)]
 
     if suffix == ".txt":
-        return _load_txt(str(path))
 
-    if suffix in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"):
-        return _load_image(str(path))
-
-    raise ValueError(f"Unsupported file type: {suffix}")
-
-
-def _load_csv(csv_path: str):
-    """
-    Load a CSV file — each row becomes a Document.
-    Handles both comma and semicolon separators.
-    """
-    import csv
-    from langchain_core.documents import Document
-
-    docs = []
-    try:
-        with open(csv_path, "r", encoding="utf-8-sig", errors="replace") as f:
-            # Auto-detect delimiter
-            sample = f.read(2048)
-            f.seek(0)
-            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
-            reader  = csv.DictReader(f, dialect=dialect)
-            headers = reader.fieldnames or []
-
-            for i, row in enumerate(reader):
-                # Convert row to readable text: "Column: Value, Column: Value …"
-                parts = [f"{k}: {v}" for k, v in row.items() if v and v.strip()]
-                text  = " | ".join(parts)
-                if text.strip():
-                    docs.append(Document(
-                        page_content=text,
-                        metadata={
-                            "source":  csv_path,
-                            "row":     i + 1,
-                            "page":    i,
-                            "columns": ", ".join(headers),
-                        }
-                    ))
-    except Exception as e:
-        logger.warning("[RAG] CSV parse error: %s", e)
-        # Fallback: read raw text
-        with open(csv_path, "r", encoding="utf-8-sig", errors="replace") as f:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             text = f.read()
-        docs = [Document(page_content=text, metadata={"source": csv_path, "page": 0})]
 
-    logger.info("[RAG] CSV loaded: %d rows from %s", len(docs), csv_path)
-    return docs
+        return [Document(page_content=text)]
 
+    if suffix in (".png",".jpg",".jpeg",".webp",".bmp",".tiff"):
 
-def _load_txt(txt_path: str):
-    """Load a plain text file."""
-    from langchain_core.documents import Document
-    with open(txt_path, "r", encoding="utf-8", errors="replace") as f:
-        text = f.read()
-    return [Document(page_content=text, metadata={"source": txt_path, "page": 0})]
+        from PIL import Image
+        import pytesseract
 
+        img = Image.open(file_path)
 
-def _load_image(image_path: str):
-    """OCR an image and return a list with one Document."""
-    if not _OCR_AVAILABLE:
-        raise RuntimeError(
-            "Pillow and pytesseract are required for image processing. "
-            "Run: pip install Pillow pytesseract"
+        img = img.convert("L")
+
+        text = pytesseract.image_to_string(
+            img,
+            lang="eng+hin",
+            config="--psm 6"
         )
 
-    from langchain_core.documents import Document
+        logger.info("[OCR] extracted %s chars", len(text))
 
-    img  = Image.open(image_path)
-    text = pytesseract.image_to_string(img, lang="eng+hin")  # English + Hindi OCR
+        if not text.strip():
+            text = "[No readable text found in image]"
 
-    if not text.strip():
-        text = "[No readable text found in image]"
+        return [Document(page_content=text)]
 
-    return [
-        Document(
-            page_content=text,
-            metadata={"source": image_path, "page": 0}
-        )
-    ]
+    raise ValueError(f"Unsupported file: {suffix}")
 
-# ─────────────────────────────────────────────
-# PROCESS FILE  (PDF / image / doc)
-# ─────────────────────────────────────────────
 
-def process_file(file_path: str, file_id: str) -> dict:
-    """
-    Ingest any supported file type into a FAISS vector store.
-    Replaces the old process_pdf() — but process_pdf() still works as alias.
-    """
+# ------------------------------------------------
+# FILE PROCESSING
+# ------------------------------------------------
+
+def process_file(file_path, file_id):
+
     if not os.path.isfile(file_path):
         raise FileNotFoundError(file_path)
 
-    _ensure_dir()
+    VECTOR_DIR.mkdir(parents=True, exist_ok=True)
 
-    logger.info("[RAG] Processing file %s", file_path)
-
-    pages = _load_document(file_path)
+    docs = load_document(file_path)
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=_CHUNK_SIZE,
-        chunk_overlap=_CHUNK_OVERLAP
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP
     )
 
-    chunks = splitter.split_documents(pages)
+    chunks = splitter.split_documents(docs)
 
-    for i, chunk in enumerate(chunks):
-        chunk.metadata["chunk_index"] = i
-        chunk.metadata["file_id"]     = file_id
+    logger.info("[RAG] chunks created %s", len(chunks))
 
-    vector_store = FAISS.from_documents(chunks, _embeddings())
+    store = FAISS.from_documents(
+        chunks,
+        emb()
+    )
 
-    store_path = _store_path(file_id)
-    vector_store.save_local(str(store_path))
-
-    logger.info("[RAG] Vector store saved to %s", store_path)
+    store.save_local(str(store_path(file_id)))
 
     return {
-        "page_count":       len(pages),
-        "chunk_count":      len(chunks),
-        "vector_store_id":  file_id
+        "page_count": len(docs),
+        "chunk_count": len(chunks),
+        "vector_store_id": file_id
     }
 
 
-# Backward-compat alias
-def process_pdf(pdf_path: str, pdf_id: str) -> dict:
-    return process_file(pdf_path, pdf_id)
-
-# ─────────────────────────────────────────────
+# ------------------------------------------------
 # QUERY
-# ─────────────────────────────────────────────
+# ------------------------------------------------
 
 def query(
-    vector_store_id: str,
-    question: str,
-    chat_history:    Optional[list] = None,
-    mode:            str = "document"   # "document" | "chat" | "web"
+    vector_store_id,
+    question,
+    chat_history: Optional[list] = None,
+    mode="document"
 ):
+
     start = time.monotonic()
 
-    lang   = detect_language(question)
-    logger.info("[RAG] Detected language: %s", lang)
-
-    # ── Answer cache (skip for chat mode — always fresh) ─────────────────────
-    if mode not in ("chat",):
-        _cache_key = f"{vector_store_id}:{mode}:{lang}:{question.strip().lower()[:120]}"
-        cached     = _answer_cache.get(_cache_key)
-        if cached and (time.monotonic() - cached["ts"]) < _ANSWER_CACHE_TTL:
-            logger.info("[RAG] Cache hit — returning instantly")
-            return cached["result"]
-
-    # ── Free chat mode ────────────────────────────────────────────────────────
-    if mode == "chat":
-        return _free_chat(question, lang, chat_history)
-
-    # ── Forced web search ─────────────────────────────────────────────────────
-    if mode == "web":
-        result = web_answer(question, _llm(), lang)
-        _answer_cache[_cache_key] = {"result": result, "ts": time.monotonic()}
-        return result
-
-    # ── Document RAG ──────────────────────────────────────────────────────────
     try:
-        vector_store = _load_vector_store(vector_store_id)
-    except FileNotFoundError:
-        logger.info("[RAG] Vector store missing → Web search")
-        return web_answer(question, _llm(), lang)
+        store = load_store(vector_store_id)
 
-    docs_with_scores = vector_store.similarity_search_with_score(question, k=_TOP_K)
+    except Exception:
 
-    if not docs_with_scores:
-        logger.info("[RAG] No match → Web search")
-        return web_answer(question, _llm(), lang)
+        logger.warning("[RAG] vector store missing")
 
-    best_score = docs_with_scores[0][1]
+        return web_answer(question, llm(), detect_language(question))
 
-    if best_score > _SCORE_THRESHOLD:
-        logger.info("[RAG] Weak match (%.2f) → Web search", best_score)
-        return web_answer(question, _llm(), lang)
-
-    retriever = vector_store.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": _TOP_K, "fetch_k": 8}   # fetch_k reduced for speed
+    results = store.similarity_search_with_score(
+        question,
+        k=TOP_K
     )
 
-    # Build conversation history pairs
-    history = []
-    if chat_history:
-        msgs = [m for m in chat_history if m["role"] in ("user", "assistant")]
-        i = 0
-        while i < len(msgs) - 1:
-            if msgs[i]["role"] == "user" and msgs[i + 1]["role"] == "assistant":
-                history.append((msgs[i]["content"], msgs[i + 1]["content"]))
-                i += 2
-            else:
-                i += 1
+    if not results:
 
-    chain = ConversationalRetrievalChain.from_llm(
-        llm=_llm(),
-        retriever=retriever,
-        return_source_documents=True,
-        combine_docs_chain_kwargs={"prompt": _build_prompt(lang)}
+        logger.warning("[RAG] no document results")
+
+        return web_answer(question, llm(), detect_language(question))
+
+    best_score = results[0][1]
+
+    logger.info("[RAG] best score %s", best_score)
+
+    if best_score > SCORE_THRESHOLD:
+
+        logger.warning("[RAG] weak document match")
+
+        return web_answer(question, llm(), detect_language(question))
+
+    context_parts = []
+
+    for doc, score in results:
+        context_parts.append(doc.page_content)
+
+    context = "\n\n".join(context_parts)
+
+    prompt = PROMPT.format(
+        context=context[:4000],
+        question=question
     )
 
-    result = chain.invoke({"question": question, "chat_history": history})
+    answer = llm().invoke(prompt)
 
-    latency_ms = int((time.monotonic() - start) * 1000)
+    answer_text = answer.strip()
 
-    seen_pages = set()
-    sources    = []
+    # ------------------------------------------------
+    # WEB FALLBACK IF ANSWER NOT FOUND
+    # ------------------------------------------------
 
-    for doc in result.get("source_documents", []):
-        page = int(doc.metadata.get("page", 0)) + 1
-        if page not in seen_pages:
-            seen_pages.add(page)
-            snippet = doc.page_content[:250].strip()
-            if len(doc.page_content) > 250:
-                snippet += "..."
-            sources.append({"page": page, "content": snippet})
+    if "not present in the document" in answer_text.lower():
 
-    sources.sort(key=lambda s: s["page"])
+        logger.info("[RAG] answer not in document → using web")
 
-    final = {
-        "answer":     result["answer"].strip(),
-        "sources":    sources,
-        "latency_ms": latency_ms,
-        "language":   lang,
-        "mode":       "document",
-    }
+        return web_answer(question, llm(), detect_language(question))
 
-    # Store in cache for identical future questions
-    _answer_cache[_cache_key] = {"result": final, "ts": time.monotonic()}
-
-    return final
-
-
-def _free_chat(question: str, lang: str, chat_history: Optional[list] = None) -> dict:
-    """
-    Friendly conversational chat with NO document context.
-    Works like a smart buddy who can chat in Hindi/Hinglish/English.
-    """
-    start = time.monotonic()
-
-    system_persona = (
-        "You are a brilliant, funny, and warm AI buddy. "
-        "You talk like a close friend — honest, helpful, sometimes witty. "
-        "You can talk in Hindi, Hinglish, and English seamlessly based on what the user uses. "
-        "Keep answers concise but genuinely useful. No corporate speak."
-    )
-
-    history_text = ""
-    if chat_history:
-        for m in chat_history[-6:]:      # last 6 messages for context
-            role  = "User" if m["role"] == "user" else "You"
-            history_text += f"\n{role}: {m['content']}"
-
-    prompt = f"""{system_persona}
-
-{_language_instruction(lang)}
-
-Previous conversation:{history_text if history_text else ' (none)'}
-
-User: {question}
-
-You:"""
-
-    answer = _llm().invoke(prompt)
+    latency = int((time.monotonic() - start) * 1000)
 
     return {
-        "answer":     answer.strip(),
-        "sources":    [],
-        "latency_ms": int((time.monotonic() - start) * 1000),
-        "language":   lang,
-        "mode":       "chat"
+        "answer": answer_text,
+        "sources": [{"content": context[:200]}],
+        "latency_ms": latency
     }
 
-# ─────────────────────────────────────────────
-# DELETE / EXISTS
-# ─────────────────────────────────────────────
 
-def delete_store(vector_store_id: str):
-    store_path = _store_path(vector_store_id)
-    if store_path.exists():
-        shutil.rmtree(store_path)
-        _vector_store_cache.pop(vector_store_id, None)
-        logger.info("[RAG] Deleted vector store %s", vector_store_id)
+# ------------------------------------------------
+# DELETE STORE
+# ------------------------------------------------
+
+def delete_store(store_id):
+
+    path = store_path(store_id)
+
+    if path.exists():
+        shutil.rmtree(path)
+
+    _vector_cache.pop(store_id, None)
 
 
-def store_exists(vector_store_id: str) -> bool:
-    return _store_path(vector_store_id).exists()
+def store_exists(store_id):
+
+    return store_path(store_id).exists()

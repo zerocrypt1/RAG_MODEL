@@ -1,0 +1,14 @@
+{
+  "session_id": "b66aefb0-c6cb-4fac-b415-8f87a4abefc5",
+  "title": "Chat about Ticket_2449301232.pdf",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Passenger details"
+    },
+    {
+      "role": "assistant",
+      "content": "The passenger details are as follows:\n\n1. Name: SHIVAM PANDEY\n2. Age: 25\n3. Gender: M\n4. Booking Status: CNF/B9/14/UPPER\n5. Current Status: CNF/B9/14/UPPER\n\nAcronyms:\n- CNF: Confirmed\n- B9: Berth Number 9\n- UPPER: Upper Berth\n\nAdditional details:\n- Transaction ID: 100006319804133\n- PNR Train No./Name: 2449301232 / 12556/GORAKHDHAM EXP\n- Class: THIRD AC (3A)\n- Quota: TATKAL (TQ)\n- Distance: 515 KM\n- Booking Date: 20-Jan-2026 19:46:24 HRS\n- Quota Distance Booking: TATKAL (TQ) 515 KM 20-Jan-2026 19:46:24 HRS"
+    }
+  ]
+}

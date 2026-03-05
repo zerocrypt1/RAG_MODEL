@@ -1,0 +1,14 @@
+{
+  "session_id": "1051e8cf-17b0-48a7-b913-a2856ee95680",
+  "title": "Chat about Gemini_Generated_Image_b07z37b07z37b07z_1.png",
+  "messages": [
+    {
+      "role": "user",
+      "content": "explain this img"
+    },
+    {
+      "role": "assistant",
+      "content": "The provided context does not contain an image. It is a text document that includes information about a Backend Developer named Prakharjain007, his specialties, interests, and contact details. There is no image to explain."
+    }
+  ]
+}

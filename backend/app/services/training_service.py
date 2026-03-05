@@ -85,7 +85,7 @@ def _load_document_chunks() -> list[dict]:
         from langchain_community.vectorstores import FAISS
 
         emb = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
+            model_name="BAAI/bge-small-en-v1.5"
         )
     except ImportError:
         logger.error("[Train] langchain not installed")
@@ -174,20 +174,16 @@ def _load_custom_qa() -> list[dict]:
 # ─────────────────────────────────────────────
 
 def _chunk_to_instruction(chunk: dict) -> dict:
-    """
-    Convert a raw document chunk into an instruction-tuning example.
-    Uses a simple "Explain this passage" template.
-    """
     text = chunk["text"]
     src  = chunk["source"]
-    return {
-        "instruction": f"Based on the following text from '{src}', answer questions accurately and helpfully.",
-        "input":       text[:600],
-        "output":      f"This passage from '{src}' covers: {text[:300]}...",
-        "source":      src,
-        "type":        "document_chunk",
-    }
 
+    return {
+        "instruction": f"What information does the following text from '{src}' explain?",
+        "input": text[:800],
+        "output": text[:500],
+        "source": src,
+        "type": "document_chunk",
+    }
 
 def _qa_to_instruction(pair: dict) -> dict:
     """Convert a Q&A pair into an instruction-tuning example."""
@@ -229,7 +225,7 @@ def build_dataset() -> dict:
     seen  = set()
     dedup = []
     for ex in examples:
-        key = ex["instruction"][:120]
+        key = (ex["instruction"] + ex.get("input",""))[:200]
         if key not in seen:
             seen.add(key)
             dedup.append(ex)
@@ -268,7 +264,7 @@ def get_dataset_stats() -> dict:
 # OLLAMA MODELFILE TRAINING  (Fast — no GPU)
 # ─────────────────────────────────────────────
 
-def _build_knowledge_block(max_chars: int = 12_000) -> str:
+def _build_knowledge_block(max_chars: int = 20000) -> str:
     """
     Extract the most important text from the dataset to embed
     directly into the Ollama system prompt.
@@ -359,8 +355,9 @@ When answering:
 
     modelfile_content = f"""FROM {_BASE_OLLAMA_MODEL}
 
-PARAMETER temperature 0.3
-PARAMETER num_ctx 4096
+PARAMETER temperature 0.2
+PARAMETER num_ctx 8192
+PARAMETER repeat_penalty 1.1
 PARAMETER num_thread 8
 PARAMETER top_k 40
 PARAMETER top_p 0.9

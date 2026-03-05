@@ -190,7 +190,7 @@ export default function HomePage() {
       }}>
         <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 20, fontWeight: 800, color: '#F5F0E8', display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 22 }}>🤖</span>
-          <span className="shimmer-text">BuddyAI</span>
+          <span className="shimmer-text">QUBISA</span>
         </div>
         <div style={{ display: 'flex', gap: 12 }}>
           <button
@@ -368,7 +368,7 @@ export default function HomePage() {
           {/* Terminal header */}
           <div style={{ padding: '14px 20px', borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', gap: 8 }}>
             {['#FF5F57','#FEBC2E','#28C840'].map(c => <div key={c} style={{ width: 12, height: 12, borderRadius: '50%', background: c }} />)}
-            <span style={{ marginLeft: 8, fontSize: 13, color: '#6B6660' }}>BuddyAI — Live demo</span>
+            <span style={{ marginLeft: 8, fontSize: 13, color: '#6B6660' }}>QUBISA — Live demo</span>
           </div>
           {/* Chat messages */}
           <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -432,7 +432,7 @@ export default function HomePage() {
       {/* ── FOOTER ──────────────────────────────────────────────────────────── */}
       <footer style={{ padding: '32px 40px', borderTop: '1px solid rgba(255,255,255,0.06)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16 }}>
         <div style={{ fontFamily: "'Syne', sans-serif", fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span>🤖</span> <span className="shimmer-text">BuddyAI</span>
+          <span>🤖</span> <span className="shimmer-text">QUBISA</span>
         </div>
         <div style={{ fontSize: 13, color: '#4A4640' }}>
           Powered by Ollama + Mistral · 100% Local · Made with ❤️ by Shivansh
